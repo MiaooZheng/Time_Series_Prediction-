@@ -1,0 +1,250 @@
+---
+title: "stats4a03 final project"
+author: "Miao Zheng"
+date: "03/04/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r echo=FALSE,message=FALSE,warning=FALSE,eval=FALSE}
+
+# We load the packages required for this workflow.
+library(ggplot2)
+library(dplyr)
+library(class)
+library(MASS)
+library(caret)
+library(devtools)
+library(forcats)
+library(AER)
+library(pscl)
+library(caTools)
+library(forecast)
+library("TTR")
+library(tseries)
+```
+
+
+```{r echo=FALSE,message=FALSE}
+TSLA <- read.csv("TSLA.csv")
+dim(TSLA)
+
+
+# Convert char to date format
+TSLA$Date <- as.Date(TSLA$Date)
+str(TSLA)
+summary(TSLA)
+head(TSLA)
+tail(TSLA)
+
+```
+
+
+
+```{r message=FALSE}
+# Here i only want to keep date and adjusted close value.
+TSLA1 <- TSLA%>%dplyr::select(1,6)
+head(TSLA1)
+dim(TSLA1)
+tail(TSLA1)
+```
+
+```{r message=FALSE,warning=FALSE}
+# Plot price first
+ggplot(data = TSLA1, aes(x = Date, y = Adj.Close))+
+  geom_line(color = "blue", size = 0.5)+ggtitle("TSLA Daily Price from 2016 to  2021")+ theme(plot.title = element_text(hjust = 0.5))
+
+
+# log price: (to make trend more precise)
+ggplot(data = TSLA1, aes(x = Date, y = log(Adj.Close)))+
+  geom_line(color = "red", size = 0.5)+ggtitle("TSLA log Daily Price from 2016 to 2021")+ theme(plot.title = element_text(hjust = 0.5))
+
+
+# there's no certain trend. We can easily see it's not stationary model, because mean/Variance is not constant overall.
+
+# just want to use plot.ts() to double check 
+TSLAtimeseries <- ts(TSLA1$Adj.Close)
+logTSLAtimeseries <- log(TSLAtimeseries)
+
+plot.ts(TSLAtimeseries)
+plot.ts(logTSLAtimeseries)
+
+
+# we can see stock price has exponential trend.
+```
+
+
+```{r message=FALSE,warning=FALSE}
+# first, we want to try MA model:
+
+TSLA1$sma10 <- SMA(na.omit(TSLA1$Adj.Close),10)
+TSLA1$sma50 <- SMA(na.omit(TSLA1$Adj.Close),50)
+TSLA1$sma100 <- SMA(na.omit(TSLA1$Adj.Close),100)
+
+ggplot(TSLA1, aes(x=Date)) + 
+  geom_line(aes(y = Adj.Close), color = "black")+   # gere is my original stock price plot
+  geom_line(aes(y = sma10), color = "red")+
+   geom_line(aes(y = sma50), color="steelblue") +
+    geom_line(aes(y = sma100), color = "orange")
+# I tried MA(10), MA(50) and MA(100) there
+
+# we can see MA(10) fit original series better
+```
+
+```{r}
+# Then I want to check ACF model a bit: 
+acf(as.vector(TSLAtimeseries), lag.max = 500)
+pacf(as.vector(TSLAtimeseries), lag.max = 500)
+
+# then we see acf and pacf don't follow AR model or MA model pattern, then we confirm that the original model is non-stationary. 
+```
+
+
+```{r}
+# Then I want to check ADF test to double confirm our model : 
+adf.test(TSLAtimeseries)
+
+# p-value = 0.8912, which is large. 
+# we can say our model is non-stationary, and we'll use ARIMA model. 
+
+adf.test(logTSLAtimeseries)
+# If I do log transformation, p-value is larger, p-value=0.9155. 
+```
+
+
+### Now, I have already shown it's non-stationary model, not a simple MA(q) model, then I'll do log transformation and then do first difference for my logTSLAtimeseries 
+
+```{r}
+plot(diff(TSLAtimeseries),ylab='First difference of Adj.Close',xlab='Date')
+plot(diff(logTSLAtimeseries),ylab='First difference of log(Adj.Close)',xlab='Date')
+
+# we see variance is not a constant, and then we do log transformation to stabilise the variance of a time series. 
+# diff(Adj.Close) is not stationary, variance is large at the end of series
+#Generally, if we remove outliers, we can assume first difference of log(Adj.Close) is stationary, let's do some acf and pacf test. -> we can see except some of them, generally, they are in +- 0.056
+```
+
+```{r}
+# now, we want to do acf and pacf for diff(logTSLAtimeseries)
+acf(as.vector(diff(logTSLAtimeseries)),lag.max=30)
+pacf(as.vector(diff(logTSLAtimeseries)),lag.max=30)
+
+# From the plots, we can see we get MA(0) from acf plot, and there's no a specific pattern from pacf plot, then we cannot confrim AR term. - lag 19 is kind of significance, but it's also small, so we can ignore it for now.
+# from the plot, we'll assume logTSLAtimeseries has model ARIMA(0,1,0), that is random walk.
+```
+
+```{r}
+# check ADF test to double confirm our model : 
+adf.test(diff(logTSLAtimeseries))
+
+# p-value <0.01, good. Then we reject H0 (non-stationry)
+# we can see after differencing once, our model is stationary now. Then we'll use arima model.
+```
+
+```{r}
+# Then I'll do the Ljung-Box  test
+Box.test(diff(logTSLAtimeseries), lag=15, type="Ljung-Box")
+
+# p-value=0.2292 >0.05, then we cannot reject H0, then we double confirm that ther's no correlation and they're independent, then we can think our logTSLAtimeseries model is random walk.
+
+# that also means our original time series model is geometric random walk, which should be a perfect model to predict our price. Let's do more to confirm it. 
+
+```
+
+### Model Fitting & Estimate the parameters
+```{r}
+# let's try random walk for logTSLAtimeseries first
+arima_model1 <- arima(logTSLAtimeseries,order=c(0,1,0))
+summary(arima_model1)
+```
+
+```{r}
+# However, I also want to do auto.arima() to let system choose the best model for us to double check
+diff <- diff(logTSLAtimeseries)
+set.seed(1)
+arima_model <- auto.arima(diff, stationary = TRUE, ic = c("aicc", "aic", "bic"), 
+                          trace = TRUE)
+
+# after differencing once, we get the best model is ARIMA(2,0,2).Compare AIC for each model, we found ARIMA(2,0,2) and ARIMA(0,0,0) have smallest AIC, which means good.
+
+# That means for the original time series model, our best model should be ARIMA(2,1,2) with non-zero mean, or random-walk with drift.
+summary(arima_model)
+```
+
+```{r}
+# then we'll fit to original model: 
+arima_model2 <- arima(logTSLAtimeseries,order=c(2,1,2))
+summary(arima_model2)
+
+# compare to the random walk model, ARIMA(2,1,2) has smaller AIC, which means it should be a better model, although we cannot see any specific pattern/clue from our acf and pacf plots, we believe there may be some constant,etc in our model, which system detect.
+
+# however, for arima(2,1,2) model, when we do Ljung-Box test, we get p-value =0.2015 > 0.05, which support the independence assumption too. 
+```
+
+### Diagnostic Checking
+
+```{r}
+checkresiduals(arima_model1) # ARIMA(0,1,0) - Random walk 
+# from the sample acf of the residual, the only "statistically significant" correlation is at lag 19, and it has a small correlation, then we don't thinkn there's a dependence at lag19. Except for marginal significance at lag19, the model seems to have captured the essence of the dependence in the series. 
+
+checkresiduals(arima_model2) # ARIMA(2,1,2) - best model system choose 
+# from the sample acf of the residual, the only "statistically significant" correlations are at lag 11 and lag 19, and it has a small correlation, then we don't thinkn there's a dependence at lag19. Except for marginal significance at lag11 and lag19, the model seems to have captured the essence of the dependence in the series. Ljung-Box test proved too.
+```
+
+- if we apart from those outliers, we can think the variance of residuals are somehow constant for most of observations, but it still has large fluctuations.
+
+```{r}
+# let's do qq plot to double check normality
+qqnorm(arima_model1$residuals, main = "Fitted ARIMA(0,1,0) Normal Q-Q Plot")
+qqline(arima_model1$residuals)
+
+# fat-tail normal qq-plot 
+
+# we can see most of them fit the straight line, but curve off in the extremities. Normal Q-Q plots shows our data have more extreme values than would be expected if they truly came from a Normal distribution.
+```
+### Forecast 
+
+```{r message=FALSE,warning=FALSE}
+library(forecast)
+# now back to the log time series model - do a long-term prediction, h=285 days.
+#use arima(0,1,0) with drift
+train <- logTSLAtimeseries[1:1000]
+fitARIMA <- auto.arima(train)
+plot(logTSLAtimeseries)
+lines(fitted(fitARIMA), col="red")
+
+prediction <- forecast(fitARIMA,h=285, level=c(95),type="o") 
+plot(forecast(prediction))
+lines(logTSLAtimeseries)
+```
+
+
+```{r message=FALSE,warning=FALSE}
+# now back to the log time series model - do a short-term prediction, h=50 days.
+#use arima(2,1,2)
+train1 <- logTSLAtimeseries[1:1235]
+fitARIMA1 <- auto.arima(train1)
+plot(logTSLAtimeseries)
+lines(fitted(fitARIMA), col="red")
+
+prediction1 <- forecast(fitARIMA1,h=50, level=c(95),type="o") 
+plot(forecast(prediction1))
+lines(logTSLAtimeseries)
+```
+
+```{r}
+# forecast our original model
+train2 <- TSLAtimeseries[1:1200]
+fit_arima_org <- auto.arima(train2)
+fitARIMA2 <- auto.arima(train2, trace=TRUE)
+plot(TSLAtimeseries)
+lines(fitted(fitARIMA1), col="red")
+
+prediction2 <- forecast(fitARIMA2,h=85, level=c(95)) 
+plot(forecast(prediction2))
+lines(TSLAtimeseries)
+```
+
